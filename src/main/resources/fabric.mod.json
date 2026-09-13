@@ -1,0 +1,29 @@
+{
+	"schemaVersion": 1,
+	"id": "nokaboom",
+	"version": "${version}",
+	"name": "NoKABOOM",
+	"description": "Client-side PvP helper: highlights armor and held weapons with tracked enchantments in custom colors.",
+	"authors": [
+		"newroze"
+	],
+	"contact": {
+		"sources": "https://github.com/newroze/NoKABOOM"
+	},
+	"license": "MIT",
+	"icon": "assets/nokaboom/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"com.newroze.nokaboom.NoKABOOMClient"
+		]
+	},
+	"mixins": [
+		"nokaboom.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~1.21.11",
+		"java": ">=21"
+	}
+}
