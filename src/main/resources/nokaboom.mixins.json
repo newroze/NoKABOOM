@@ -4,7 +4,10 @@
 	"compatibilityLevel": "JAVA_21",
 	"client": [
 		"client.ArmorFeatureRendererMixin",
+		"client.EquipmentRendererMixin",
 		"client.HeldItemFeatureRendererMixin",
+		"client.ItemRenderStateAccessor",
+		"client.ItemLayerAccessor",
 		"client.MinecraftClientMixin",
 		"client.GameMenuScreenMixin"
 	],

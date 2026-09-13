@@ -9,7 +9,6 @@ import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.ItemEnchantmentsComponent;
 import net.minecraft.item.ItemStack;
 
-import java.io.IOException;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -46,18 +45,21 @@ public final class NoKABOOMConfig {
 	/** Highlight held items (swords etc.) in players' / stands' hands. */
 	public boolean highlightHeldItems = true;
 
-	/** Lowest overlay opacity (0-255). */
+	/** Legacy field, kept so old configs still load. The menu now uses a single opacity ({@link #maxAlpha}). */
 	public int minAlpha = 0x55;
 
-	/** Highest overlay opacity (0-255). */
+	/**
+	 * Glow opacity (0-255): how visible the tint is.
+	 * Shown in the menu as «Прозрачность»: {@code 0} — almost invisible,
+	 * {@code 255} — solid color.
+	 */
 	public int maxAlpha = 0xA0;
 
 	/**
-	 * Pulse speed in radians per second. The overlay breathes between
-	 * {@link #minAlpha} and {@link #maxAlpha}. {@code 0} disables pulsing
-	 * and pins the overlay at {@link #maxAlpha}.
+	 * Legacy pulse speed. Pulsing was removed from the menu (the glow is now
+	 * always static); old configs are migrated to {@code 0} on load.
 	 */
-	public double pulseSpeed = 2.5;
+	public double pulseSpeed = 0.0;
 
 	/**
 	 * The armor overlay is rendered slightly larger than the armor piece itself
@@ -72,10 +74,11 @@ public final class NoKABOOMConfig {
 	public boolean fullbright = true;
 
 	/**
-	 * Size of the glow box drawn around a highlighted held item (in blocks).
-	 * {@code 0.55} covers a sword nicely without hiding the player.
+	 * Scale of the held-item glow overlay (the enchant-colored copy of the item
+	 * model drawn slightly larger so it never z-fights the real item).
+	 * {@code 1.04} ≈ +4%. Pure geometry scale — no shader, no FPS cost.
 	 */
-	public float heldBoxSize = 0.55F;
+	public float heldGlowScale = 1.04F;
 
 	/** Per-enchantment settings, keyed by enchantment id ({@code minecraft:sharpness}). */
 	public Map<String, EnchantEntry> enchantments = defaultEnchantments();
@@ -172,8 +175,12 @@ public final class NoKABOOMConfig {
 			save();
 			return;
 		}
-		instance.validate();
-		save();
+		try {
+			instance.validate();
+			save();
+		} catch (Exception e) {
+			NoKABOOM.LOGGER.warn("[NoKABOOM] Config validate/save failed: {}", e.toString());
+		}
 	}
 
 	/**
@@ -193,6 +200,7 @@ public final class NoKABOOMConfig {
 					into.enchantments.put("minecraft:blast_protection", new EnchantEntry(true, rgb));
 				} else {
 					blast.color = rgb;
+					blast.enabled = true;
 				}
 				NoKABOOM.LOGGER.info("[NoKABOOM] Migrated legacy highlightRgb to blast_protection color.");
 			}
@@ -209,7 +217,7 @@ public final class NoKABOOMConfig {
 			try (Writer writer = Files.newBufferedWriter(file)) {
 				GSON.toJson(get(), writer);
 			}
-		} catch (IOException e) {
+		} catch (Exception e) {
 			NoKABOOM.LOGGER.warn("[NoKABOOM] Could not save config: {}", e.toString());
 		}
 	}
@@ -260,7 +268,11 @@ public final class NoKABOOMConfig {
 		if (id == null) {
 			return null;
 		}
-		EnchantEntry setting = get().enchantments.get(id);
+		Map<String, EnchantEntry> m = get().enchantments;
+		if (m == null) {
+			return null;
+		}
+		EnchantEntry setting = m.get(id);
 		return setting != null ? setting.color & 0xFFFFFF : null;
 	}
 
@@ -269,11 +281,7 @@ public final class NoKABOOMConfig {
 		NoKABOOMConfig config = get();
 		List<String> ids = new ArrayList<>();
 		for (String id : defaultEnchantments().keySet()) {
-			if (config.enchantments != null && config.enchantments.containsKey(id)) {
-				ids.add(id);
-			} else {
-				ids.add(id);
-			}
+			ids.add(id);
 		}
 		if (config.enchantments != null) {
 			for (String id : config.enchantments.keySet()) {
@@ -285,12 +293,160 @@ public final class NoKABOOMConfig {
 		return ids;
 	}
 
+	/** Item groups for the menu filter chips («выбор предмета»). */
+	public enum ItemCat {
+		ALL("Все"),
+		ARMOR("Броня"),
+		WEAPON("Оружие"),
+		RANGED("Луки"),
+		TOOLS("Инструменты");
+
+		public final String label;
+
+		ItemCat(String label) {
+			this.label = label;
+		}
+	}
+
+	/**
+	 * Which item groups this enchantment can be applied to.
+	 * Used by the menu chips: pick «Меч» and the list shows only sword enchants.
+	 * Unknown (modded) ids show up in every group so they are never hidden.
+	 */
+	public static java.util.EnumSet<ItemCat> catsFor(String id) {
+		if (id == null) {
+			return java.util.EnumSet.of(ItemCat.ALL);
+		}
+		switch (id) {
+			case "minecraft:protection":
+			case "minecraft:fire_protection":
+			case "minecraft:blast_protection":
+			case "minecraft:projectile_protection":
+			case "minecraft:feather_falling":
+			case "minecraft:respiration":
+			case "minecraft:aqua_affinity":
+			case "minecraft:thorns":
+			case "minecraft:depth_strider":
+			case "minecraft:frost_walker":
+			case "minecraft:soul_speed":
+			case "minecraft:swift_sneak":
+			case "minecraft:binding_curse":
+				return java.util.EnumSet.of(ItemCat.ARMOR);
+			case "minecraft:sharpness":
+			case "minecraft:smite":
+			case "minecraft:bane_of_arthropods":
+			case "minecraft:fire_aspect":
+			case "minecraft:knockback":
+			case "minecraft:looting":
+			case "minecraft:sweeping_edge":
+			case "minecraft:breach":
+			case "minecraft:density":
+			case "minecraft:wind_burst":
+				return java.util.EnumSet.of(ItemCat.WEAPON);
+			case "minecraft:power":
+			case "minecraft:punch":
+			case "minecraft:flame":
+			case "minecraft:infinity":
+			case "minecraft:quick_charge":
+			case "minecraft:multishot":
+			case "minecraft:piercing":
+			case "minecraft:loyalty":
+			case "minecraft:impaling":
+			case "minecraft:riptide":
+			case "minecraft:channeling":
+				return java.util.EnumSet.of(ItemCat.RANGED);
+			case "minecraft:efficiency":
+			case "minecraft:fortune":
+			case "minecraft:silk_touch":
+			case "minecraft:luck_of_the_sea":
+			case "minecraft:lure":
+				return java.util.EnumSet.of(ItemCat.TOOLS);
+			case "minecraft:mending":
+			case "minecraft:unbreaking":
+			case "minecraft:vanishing_curse":
+				return java.util.EnumSet.of(ItemCat.ARMOR, ItemCat.WEAPON, ItemCat.RANGED, ItemCat.TOOLS);
+			default:
+				return java.util.EnumSet.of(ItemCat.ARMOR, ItemCat.WEAPON, ItemCat.RANGED, ItemCat.TOOLS);
+		}
+	}
+
+	/**
+	 * Short Russian hint shown under the enchantment, e.g. «Меч».
+	 * Answers «на каком предмете бывает это зачарование».
+	 */
+	public static String itemHint(String id) {
+		if (id == null) {
+			return "";
+		}
+		switch (id) {
+			case "minecraft:protection":
+			case "minecraft:fire_protection":
+			case "minecraft:blast_protection":
+			case "minecraft:projectile_protection":
+			case "minecraft:thorns":
+			case "minecraft:binding_curse":
+				return "Броня";
+			case "minecraft:feather_falling":
+			case "minecraft:depth_strider":
+			case "minecraft:frost_walker":
+			case "minecraft:soul_speed":
+				return "Ботинки";
+			case "minecraft:respiration":
+			case "minecraft:aqua_affinity":
+				return "Шлем";
+			case "minecraft:swift_sneak":
+				return "Штаны";
+			case "minecraft:sharpness":
+			case "minecraft:smite":
+			case "minecraft:bane_of_arthropods":
+			case "minecraft:fire_aspect":
+			case "minecraft:knockback":
+			case "minecraft:looting":
+			case "minecraft:sweeping_edge":
+				return "Меч";
+			case "minecraft:breach":
+			case "minecraft:density":
+			case "minecraft:wind_burst":
+				return "Булава";
+			case "minecraft:power":
+			case "minecraft:punch":
+			case "minecraft:flame":
+			case "minecraft:infinity":
+				return "Лук";
+			case "minecraft:quick_charge":
+			case "minecraft:multishot":
+			case "minecraft:piercing":
+				return "Арбалет";
+			case "minecraft:loyalty":
+			case "minecraft:impaling":
+			case "minecraft:riptide":
+			case "minecraft:channeling":
+				return "Трезубец";
+			case "minecraft:efficiency":
+			case "minecraft:fortune":
+			case "minecraft:silk_touch":
+				return "Кирка, топор";
+			case "minecraft:luck_of_the_sea":
+			case "minecraft:lure":
+				return "Удочка";
+			case "minecraft:mending":
+			case "minecraft:unbreaking":
+			case "minecraft:vanishing_curse":
+				return "Все предметы";
+			default:
+				return "";
+		}
+	}
+
 	private static int clamp(int value, int min, int max) {
 		return Math.max(min, Math.min(max, value));
 	}
 
 	private void validate() {
-		if (enchantments == null || enchantments.isEmpty()) {
+		// Pulse was removed from the menu: the glow is always static,
+		// opacity comes from maxAlpha («Прозрачность»).
+		pulseSpeed = 0.0;
+		if (enchantments == null) {
 			enchantments = defaultEnchantments();
 		} else {
 			// Add newly introduced defaults without touching user choices.
@@ -310,14 +466,12 @@ public final class NoKABOOMConfig {
 			minAlpha = maxAlpha;
 			maxAlpha = swap;
 		}
-		if (!Double.isFinite(pulseSpeed) || pulseSpeed < 0.0 || pulseSpeed > 20.0) {
-			pulseSpeed = 0.0;
-		}
+		pulseSpeed = 0.0;
 		if (!Float.isFinite(expandScale) || expandScale < 1.0F || expandScale > 1.2F) {
 			expandScale = 1.03F;
 		}
-		if (!Float.isFinite(heldBoxSize) || heldBoxSize < 0.3F || heldBoxSize > 1.5F) {
-			heldBoxSize = 0.55F;
+		if (!Float.isFinite(heldGlowScale) || heldGlowScale < 1.0F || heldGlowScale > 1.15F) {
+			heldGlowScale = 1.04F;
 		}
 	}
 }

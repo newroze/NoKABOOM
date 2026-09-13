@@ -1,30 +1,44 @@
 package com.newroze.nokaboom.render;
 
-import com.newroze.nokaboom.NoKABOOM;
 import com.newroze.nokaboom.config.NoKABOOMConfig;
+import com.newroze.nokaboom.mixin.client.ItemLayerAccessor;
+import com.newroze.nokaboom.mixin.client.ItemRenderStateAccessor;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
-import net.minecraft.client.render.VertexConsumer;
+import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.render.command.OrderedRenderCommandQueue;
 import net.minecraft.client.render.entity.state.ArmedEntityRenderState;
 import net.minecraft.client.render.entity.state.ArmorStandEntityRenderState;
 import net.minecraft.client.render.entity.state.PlayerEntityRenderState;
+import net.minecraft.client.render.item.ItemRenderState;
+import net.minecraft.client.render.model.BakedQuad;
+import net.minecraft.client.render.model.json.Transformation;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.item.ItemDisplayContext;
 import net.minecraft.item.ItemStack;
-import net.minecraft.util.Identifier;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Highlight for held items (swords etc.): decides <em>what</em> glows and draws the glow box.
+ * Highlight for held items (swords etc.): decides <em>what</em> glows and draws the glow.
  *
- * <p>Unlike armor (which re-uses the vanilla {@code BipedEntityModel}), a held sword is a baked
- * item model, so there is no entity model to re-tint. Instead the mixin re-applies the vanilla
- * hand transform and submits a small translucent pulsing cube around the item via
- * {@code OrderedRenderCommandQueue.submitCustom}. The cube uses the same white 1x1 texture as
- * armor, tinted with the tracked enchantment's custom color.
+ * <p>How it looks: instead of a box around the weapon, the weapon's own texture
+ * glows in the tracked enchantment's color. Technically it is a second draw of
+ * the exact same baked item quads (same geometry, same item texture, same
+ * per-layer transforms), tinted with the enchantment color at pulsing opacity
+ * and rendered at full brightness. No custom shader, one extra translucent
+ * draw call per layer (usually one) — effectively zero FPS cost.
+ *
+ * <p>Every tintable item layer is overlaid (solid, cutout and translucent):
+ * skipping opaque layers would mean swords never glow, since held weapons
+ * almost never use a translucent pipeline. The copy is scaled slightly up
+ * ({@link NoKABOOMConfig#heldGlowScale}) so it reads as a halo instead of
+ * hiding the real item, with pulsing opacity from
+ * {@link NoKABOOMArmorHighlight#pulseAlpha()}. Special models
+ * (trident, shield, …) have no tintable quads and are skipped.
  */
 public final class NoKABOOMHeldHighlight {
-	/** Same white 1x1 film as armor; tint comes from the vertex color. */
-	public static final Identifier TEXTURE = Identifier.of(NoKABOOM.MOD_ID, "textures/highlight.png");
-
 	private NoKABOOMHeldHighlight() {
 	}
 
@@ -45,63 +59,116 @@ public final class NoKABOOMHeldHighlight {
 		return NoKABOOMConfig.colorFor(stack);
 	}
 
-	/** Packed ARGB render color for this held stack: pulsing alpha + its enchantment RGB. */
-	public static int highlightColor(ItemStack stack) {
-		Integer rgb = NoKABOOMConfig.colorFor(stack);
-		if (rgb == null) {
-			rgb = 0xFF7A1A;
+	/**
+	 * Draws the glow overlay. Must be called with the same matrices vanilla used
+	 * for the real item (so swing / bow-pull / use poses match exactly).
+	 *
+	 * @param vanillaLight light vanilla used for the real item
+	 * @param overlay      overlay vanilla used (pass-through)
+	 * @param outlineColor outline color vanilla used (pass-through)
+	 * @param rgb          enchantment color (alpha comes from the pulse)
+	 */
+	public static void renderGlow(MatrixStack matrices, OrderedRenderCommandQueue queue,
+			ItemRenderState itemState, int vanillaLight, int overlay, int outlineColor, int rgb) {
+		if (matrices == null || queue == null || itemState == null) {
+			return;
 		}
-		return (NoKABOOMArmorHighlight.pulseAlpha() << 24) | (rgb & 0xFFFFFF);
-	}
+		NoKABOOMConfig config = NoKABOOMConfig.get();
+		int light = config.fullbright ? LightmapTextureManager.MAX_LIGHT_COORDINATE : vanillaLight;
+		int argb = (NoKABOOMArmorHighlight.pulseAlpha() << 24) | (rgb & 0xFFFFFF);
+		float scale = config.heldGlowScale;
+		if (!Float.isFinite(scale) || scale < 1.0F || scale > 1.15F) {
+			scale = 1.04F;
+		}
 
-	/**
-	 * @param vanillaLight the light vanilla used for the held item
-	 * @return full brightness when {@code fullbright} is on, else vanilla light
-	 */
-	public static int renderLight(int vanillaLight) {
-		return NoKABOOMConfig.get().fullbright ? LightmapTextureManager.MAX_LIGHT_COORDINATE : vanillaLight;
-	}
+		ItemRenderState.LayerRenderState[] layers;
+		int layerCount;
+		ItemDisplayContext displayContext;
+		try {
+			ItemRenderStateAccessor acc = (ItemRenderStateAccessor) itemState;
+			layers = acc.nokaboom$getLayers();
+			layerCount = acc.nokaboom$getLayerCount();
+			displayContext = acc.nokaboom$getDisplayContext();
+		} catch (Exception ignored) {
+			return;
+		}
+		if (layers == null || displayContext == null || layerCount <= 0) {
+			return;
+		}
+		boolean leftHand = displayContext.isLeftHand();
+		int[] glowTint = new int[]{argb};
 
-	/**
-	 * Draws a unit cube centered at the current matrix origin (caller scales it to
-	 * {@link NoKABOOMConfig#heldBoxSize}). Each face is tinted with {@code argb}.
-	 */
-	public static void drawBox(MatrixStack.Entry entry, VertexConsumer consumer, int argb, int light) {
-		float h = 0.5F;
-		// +Y
-		quad(entry, consumer, -h, h, -h, h, h, -h, h, h, h, -h, h, h, 0, 1, 0, argb, light);
-		// -Y
-		quad(entry, consumer, -h, -h, h, h, -h, h, h, -h, -h, -h, -h, -h, 0, -1, 0, argb, light);
-		// +X
-		quad(entry, consumer, h, -h, -h, h, -h, h, h, h, h, h, h, -h, 1, 0, 0, argb, light);
-		// -X
-		quad(entry, consumer, -h, -h, h, -h, -h, -h, -h, h, h, -h, h, h, -1, 0, 0, argb, light);
-		// +Z
-		quad(entry, consumer, -h, -h, h, h, -h, h, h, h, h, -h, h, h, 0, 0, 1, argb, light);
-		// -Z
-		quad(entry, consumer, h, -h, -h, -h, -h, -h, -h, h, -h, h, h, -h, 0, 0, -1, argb, light);
-	}
-
-	private static void quad(MatrixStack.Entry entry, VertexConsumer consumer,
-			float x1, float y1, float z1,
-			float x2, float y2, float z2,
-			float x3, float y3, float z3,
-			float x4, float y4, float z4,
-			float nx, float ny, float nz,
-			int argb, int light) {
-		vertex(entry, consumer, x1, y1, z1, nx, ny, nz, argb, light);
-		vertex(entry, consumer, x2, y2, z2, nx, ny, nz, argb, light);
-		vertex(entry, consumer, x3, y3, z3, nx, ny, nz, argb, light);
-		vertex(entry, consumer, x4, y4, z4, nx, ny, nz, argb, light);
-	}
-
-	private static void vertex(MatrixStack.Entry entry, VertexConsumer consumer,
-			float x, float y, float z, float nx, float ny, float nz, int argb, int light) {
-		consumer.vertex(entry, x, y, z)
-				.color(argb)
-				.texture(0.0F, 0.0F)
-				.overlay(OverlayTexture.DEFAULT_UV)
-				.light(light)
-				.normal(entry, nx, ny, nz);
+		matrices.push();
+		try {
+			// Slightly larger than the real item: no z-fighting, reads as a halo.
+			matrices.scale(scale, scale, scale);
+			int end = Math.min(layerCount, layers.length);
+			for (int i = 0; i < end; i++) {
+				ItemRenderState.LayerRenderState layer = layers[i];
+				if (layer == null) {
+					continue;
+				}
+				RenderLayer renderLayer;
+				Transformation transform;
+				try {
+					ItemLayerAccessor la = (ItemLayerAccessor) (Object) layer;
+					if (la.nokaboom$getSpecialModel() != null) {
+						continue;
+					}
+					renderLayer = la.nokaboom$getRenderLayer();
+					transform = la.nokaboom$getTransform();
+				} catch (Exception ignored) {
+					continue;
+				}
+				if (renderLayer == null) {
+					continue;
+				}
+				List<BakedQuad> quads;
+				try {
+					quads = layer.getQuads();
+				} catch (Exception ignored) {
+					continue;
+				}
+				if (quads == null || quads.isEmpty()) {
+					continue;
+				}
+				// Same quads, but every vertex forced to tint slot 0 = our glow color.
+				// The texture stays the item texture, so the blade keeps its shape
+				// and details and just shines in the enchantment color.
+				List<BakedQuad> tinted = new ArrayList<>(quads.size());
+				try {
+					for (BakedQuad q : quads) {
+						if (q == null) {
+							continue;
+						}
+						tinted.add(new BakedQuad(q.position0(), q.position1(), q.position2(), q.position3(),
+								q.packedUV0(), q.packedUV1(), q.packedUV2(), q.packedUV3(),
+								0, q.face(), q.sprite(), q.shade(), q.lightEmission()));
+					}
+				} catch (Exception ignored) {
+					continue;
+				}
+				if (tinted.isEmpty()) {
+					continue;
+				}
+				matrices.push();
+				try {
+					if (transform != null) {
+						transform.apply(leftHand, matrices.peek());
+					}
+					queue.submitItem(matrices, displayContext, light,
+							overlay == 0 ? OverlayTexture.DEFAULT_UV : overlay,
+							outlineColor, glowTint, tinted, renderLayer,
+							ItemRenderState.Glint.NONE);
+				} catch (Exception ignored) {
+					// A missed glow is better than a crashed frame.
+				} finally {
+					matrices.pop();
+				}
+			}
+		} catch (Exception ignored) {
+		} finally {
+			matrices.pop();
+		}
 	}
 }
