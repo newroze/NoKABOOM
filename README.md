@@ -170,7 +170,6 @@ Useful:
 
 ```bash
 ./gradlew runClient     # test client with the mod
-Mod.bat                # same, double-click on Windows
 ./gradlew genSources    # Minecraft sources for IDE reading
 ```
 
